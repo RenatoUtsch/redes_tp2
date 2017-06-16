@@ -47,11 +47,10 @@ async def receiver_loop(manager):
 
     while True:
         message = await manager.recv_message()
-        if message.header.type == message_types.MessageType.MSG:
-            print(message.data)
-            await manager.send_ack_message(message)
-        elif message.header.type == message_types.MessageType.CLIST:
-            print(message.data)
+        if (message.header.type == message_types.MessageType.MSG or
+                message.header.type == message_types.MessageType.CLIST):
+            print('Message from {}: {}'.format(message.header.origin,
+                                               message.data))
             await manager.send_ack_message(message)
         else:
             logging.error("Invalid message received: %s", repr(message))

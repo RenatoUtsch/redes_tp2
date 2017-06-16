@@ -27,6 +27,7 @@ import message_utils
 
 def main(argv):
     """Entry point of the server."""
+    logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
     args = parse_args(argv[1:])
     with message_utils.server_listener(args.address) as listener:
         event_loop = messageio.EventLoop()
@@ -52,13 +53,20 @@ async def server_loop(manager, event_loop):
 
     if message.header.origin == message_types.NEW_RECEIVER_ORIGIN:
         destination = event_loop.next_receiver_id
+        forward_id = destination
         receiver = True
     else:
         destination = event_loop.next_sender_id
+        forward_id = None
         receiver = False
 
+        if (message.header.origin >= message_types.FIRST_RECEIVER_ID and
+                message.header.origin < message_types.END_RECEIVER_ID and
+                event_loop.has_client(message.header.origin)):
+            forward_id = message.header.origin
+
     manager.destination = destination
-    event_loop.add_client(manager)
+    event_loop.add_client(manager, forward_id)
     await manager.send_ack_message(message, destination)
 
     if receiver:

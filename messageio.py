@@ -83,8 +83,12 @@ class EventLoop:
         self._handlers = {}
 
         # Map from destination id to the handler. Handlers registered in this
-        # map can be used when forwarding messages.
+        # map are clients listed in CLIST messages.
         self._clients = {}
+
+        # Map from destination to the handler to forward messages to. Handlers
+        # registered in this map can be used when forwarding messages.
+        self._forwards = {}
 
         # Next sender id.
         self._next_sender_id = message_types.FIRST_SENDER_ID
@@ -95,20 +99,22 @@ class EventLoop:
     @property
     def next_sender_id(self):
         """Returns the next sender id."""
-        next_id = self._next_sender_id
-        self._next_sender_id += 1
+        for i in range(message_types.FIRST_SENDER_ID,
+                       message_types.END_SENDER_ID):
+            if i not in self._clients:
+                return i
 
-        assert next_id < message_types.END_SENDER_ID
-        return next_id
+        raise RuntimeError('Sender ids exausted')
 
     @property
     def next_receiver_id(self):
         """Returns the next receiver id."""
-        next_id = self._next_receiver_id
-        self._next_receiver_id += 1
+        for i in range(message_types.FIRST_RECEIVER_ID,
+                       message_types.END_RECEIVER_ID):
+            if i not in self._clients:
+                return i
 
-        assert next_id < message_types.END_RECEIVER_ID
-        return next_id
+        raise RuntimeError('Receiver ids exausted')
 
     def client_list(self):
         """Returns a list with all client origins."""
@@ -119,6 +125,10 @@ class EventLoop:
     def client(self, destination):
         """Returns the resource of the client with the given destination."""
         return self._clients[destination]
+
+    def has_client(self, destination):
+        """Returns if the event loop has a client."""
+        return destination in self._clients
 
     def add_resource(self, resource, coroutine):
         """Adds a new resource to be selected by the event loop.
@@ -137,7 +147,6 @@ class EventLoop:
                 the coroutine ends, the resource is removed from the event loop.
         """
         fileno = resource.fileno()
-        logging.info('New handler: %d', fileno)
 
         if fileno in self._handlers:
             raise ResourceAlreadyRegisteredError(resource)
@@ -147,13 +156,13 @@ class EventLoop:
         try:
             handler.status = handler.coroutine.send(None)
         except StopIteration:  # Handler failed to start.
-            logging.error('Handler failed to start: %d', fileno)
+            logging.exception('Handler failed to start: %d', fileno)
         except RuntimeError:
-            logging.error('Error in handler: %d', fileno)
+            logging.exception('Error in handler: %d', fileno)
 
         self._handlers[fileno] = handler
 
-    def add_client(self, resource):
+    def add_client(self, resource, forward_id):
         """Makes an existing resource available for forwarding messages.
 
         This is done by getting an already registered resource and saving it's
@@ -169,6 +178,8 @@ class EventLoop:
         Args:
             resource: the resource to be made available for forwarding. Must
                 already have been registered by add_resource().
+            forward_id: id of the client that messages for this resource should
+                be forwarded to.
         """
         fileno = resource.fileno()
         if fileno not in self._handlers:
@@ -177,20 +188,31 @@ class EventLoop:
         handler = self._handlers[fileno]
 
         destination = handler.resource.destination
-        logging.info('New client: %d', destination)
+        logging.info('New client id: %d (handler %d)', destination, fileno)
         if destination in self._clients:
             raise ClientAlreadyRegisteredError(resource)
 
         self._clients[destination] = handler
 
+        if forward_id is not None:
+            if forward_id not in self._clients:
+                raise ClientNotRegisteredError(resource)
+
+            logging.info('Client %d forwards messages to client %d',
+                         destination, forward_id)
+            self._forwards[destination] = self._clients[forward_id]
+
     def forward_msg(self, message):
         """Forwards the given message to the correct destination handlers."""
         if message.header.destination == message_types.BROADCAST_DESTINATION:
             for destination in self.client_list():
-                self._clients[destination].forward_queue.put_nowait(message)
+                self._forward_msg_to_client(message, destination)
         else:
-            self._clients[message.header.destination].forward_queue.put_nowait(
-                message)
+            self._forward_msg_to_client(message, message.header.destination)
+
+    def _forward_msg_to_client(self, message, destination):
+        """Forwards the given message to the given client."""
+        self._forwards[destination].forward_queue.put_nowait(message)
 
     def run_forever(self):
         """Runs forever, calling the registered handlers one after the other.
@@ -211,7 +233,7 @@ class EventLoop:
                 except StopIteration:  # Handler finished.
                     handlers_to_delete.append(handler)
                 except RuntimeError:  # Error in handler.
-                    logging.error('Error in handler: %d', handler.fileno())
+                    logging.exception('Error in handler: %d', handler.fileno())
                     handlers_to_delete.append(handler)
                 except AssertionError:  # Invalid handler.status
                     logging.exception('Invalid handler.status (None)')
@@ -246,13 +268,26 @@ class EventLoop:
         """Deletes the given handlers."""
         for handler in handlers:
             fileno = handler.fileno()
-            logging.info('Bye bye handler: %d', fileno)
+            logging.info('Deleting handler %d', fileno)
             if fileno in self._handlers:
                 del self._handlers[fileno]
 
             destination = handler.resource.destination
+            if destination in self._forwards:
+                del self._forwards[destination]
+
+            forwards_to_remove = []
+            for dest_id, forward_handler in self._forwards.items():
+                if forward_handler.resource.destination == destination:
+                    forwards_to_remove.append(dest_id)
+            for dest_id in forwards_to_remove:
+                logging.info('Client %d unlinked to client %d', dest_id,
+                             destination)
+                del self._forwards[dest_id]
+
             if destination in self._clients:
-                logging.info('Bye bye client: %d', destination)
+                logging.info('Client %d has disconnected (handler %d)',
+                             destination, fileno)
                 del self._clients[destination]
 
     def _handlers_waiting_for_read(self):
@@ -323,6 +358,10 @@ class ResourceNotRegisteredError(ResourceError):
 
 class ResourceAlreadyRegisteredError(ResourceError):
     """Raised when the resource is already registered by the event loop."""
+
+
+class ClientNotRegisteredError(ResourceError):
+    """Raised when a client for forwarding is not registered."""
 
 
 class ClientAlreadyRegisteredError(ResourceError):

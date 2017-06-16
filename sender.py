@@ -26,7 +26,6 @@ import message_utils
 
 def main(argv):
     """Entry point of the receiver."""
-    logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
     args = parse_args(argv[1:])
     with message_utils.sender_manager(args.address,
                                       args.receiver_id) as manager:
