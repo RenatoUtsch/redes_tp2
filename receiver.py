@@ -30,6 +30,7 @@ def main(argv):
     with message_utils.receiver_manager(args.address) as manager:
         event_loop = messageio.EventLoop()
         event_loop.add_resource(manager, receiver_loop(manager))
+        event_loop.add_client(manager, message_types.SERVER_ID)
         event_loop.run_forever()
 
 
@@ -47,10 +48,12 @@ async def receiver_loop(manager):
 
     while True:
         message = await manager.recv_message()
-        if (message.header.type == message_types.MessageType.MSG or
-                message.header.type == message_types.MessageType.CLIST):
+        if message.header.type == message_types.MessageType.MSG:
             print('Message from {}: {}'.format(message.header.origin,
                                                message.data))
+            await manager.send_ack_message(message)
+        elif message.header.type == message_types.MessageType.CLIST:
+            print('List of clients: {}'.format(message.data))
             await manager.send_ack_message(message)
         else:
             logging.error("Invalid message received: %s", repr(message))

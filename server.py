@@ -69,10 +69,13 @@ async def server_loop(manager, event_loop):
     event_loop.add_client(manager, forward_id)
     await manager.send_ack_message(message, destination)
 
-    if receiver:
-        await receiver_loop(manager, event_loop)
-    else:
-        await sender_loop(manager, event_loop)
+    try:
+        if receiver:
+            await receiver_loop(manager, event_loop)
+        else:
+            await sender_loop(manager, event_loop)
+    except KeyboardInterrupt:
+        event_loop.close_server()
 
 
 async def sender_loop(manager, event_loop):
@@ -80,10 +83,7 @@ async def sender_loop(manager, event_loop):
     while True:
         message = await manager.recv_message()
 
-        if message.header.type == message_types.MessageType.CLOSE:
-            await manager.send_ack_message(message)
-            break
-        elif message.header.type == message_types.MessageType.MSG:
+        if message.header.type == message_types.MessageType.MSG:
             try:
                 event_loop.forward_msg(message)
                 await manager.send_ack_message(message)
@@ -111,10 +111,10 @@ async def receiver_loop(manager, unused_event_loop):
             await manager.send_ack_message(message)
         elif message.header.type == message_types.MessageType.MSG:
             await manager.send_msg_message(message)
-            await manager.recv_ack_message()
+            await manager.recv_ack_message(message)
         elif message.header.type == message_types.MessageType.CLIST:
-            await manager.send_clist_message(message)
-            await manager.recv_ack_message()
+            message = await manager.send_clist_message(message)
+            await manager.recv_ack_message(message)
         else:
             logging.error("Invalid receiver message received: %s",
                           repr(message))

@@ -114,7 +114,11 @@ class MessageManager:
         total_sent = 0
         while total_sent < size:
             await messageio.wait_for_write()
-            sent = self._socket.send(data[total_sent:])
+            try:
+                sent = self._socket.send(data[total_sent:])
+            except ConnectionResetError:  # Disconnected
+                logging.error('Connection reset')
+                raise RuntimeError()
             if sent == 0:
                 logging.error('Connection broken')
                 raise RuntimeError()
@@ -126,7 +130,11 @@ class MessageManager:
         total_received = 0
         while total_received < size:
             await messageio.wait_for_read()
-            chunk = self._socket.recv(size - total_received)
+            try:
+                chunk = self._socket.recv(size - total_received)
+            except ConnectionResetError:  # Disconnected
+                logging.error('Connection reset')
+                raise RuntimeError()
             if not chunk:
                 logging.error('Connection broken')
                 raise RuntimeError()
@@ -134,13 +142,8 @@ class MessageManager:
             total_received += len(chunk)
         return b''.join(chunks)
 
-    async def _send_message(self, message):
-        """Sends a message. To be used by this and derived classes."""
-        logging.info('send: %s', repr(message))
-        return await self._send_bytes(message_types.pack_message(message))
-
-    async def recv_message(self):
-        """Receives a message. To be used by this and derived classes."""
+    async def _recv_entire_message(self):
+        """Receives an entire message and returns it."""
         packed_header = await self._recv_bytes(message_types.HEADER_SIZE)
         header = message_types.unpack_header(packed_header)
 
@@ -159,14 +162,37 @@ class MessageManager:
         else:
             data = None
 
-        message = message_types.Message(header, data)
+        return message_types.Message(header, data)
+
+    async def _send_message(self, message):
+        """Sends a message. To be used by this and derived classes."""
+        logging.info('send: %s', repr(message))
+        await self._send_bytes(message_types.pack_message(message))
+
+    async def _accept_recv_message(self, message):
+        """Accepts a new recv message. To be used by derived classes."""
         logging.info('recv: %s', repr(message))
+
+        if message.header.type == message_types.MessageType.CLOSE:
+            await self.send_ack_message(message)
+            raise messageio.ResourceClosed()
+
         return message
 
-    async def recv_ack_message(self):
-        """Receives an ack message. Logs if it is an error."""
+    async def recv_message(self):
+        """Receives a valid message. To be used by this and derived classes."""
+        message = await self._recv_entire_message()
+        return await self._accept_recv_message(message)
+
+    async def recv_ack_message(self, original_message):
+        """Receives an ack message for the message. Logs if it is an error."""
         message = await self.recv_message()
-        if message.header.type == message_types.MessageType.ERROR:
+        if (message.header.type != message_types.MessageType.ACK and
+                message.header.type != message_types.MessageType.ERROR):
+            logging.error('Invalid message, expected ack: %s', repr(message))
+        elif message.header.id != original_message.header.id:
+            logging.error('Ack for message with wrong id: %s', repr(message))
+        elif message.header.type == message_types.MessageType.ERROR:
             logging.error('Message returned as an error: %s', repr(message))
 
     async def recv_forwarded_message(self):
@@ -215,6 +241,7 @@ class MessageManager:
             id=self._next_message_id)
 
         await self._send_message(message)
+        return message
 
 
 class ServerManager(MessageManager):
@@ -223,6 +250,17 @@ class ServerManager(MessageManager):
     def __init__(self, socket):
         """Initializes the manager."""
         super().__init__(socket, message_types.SERVER_ID, None)
+
+    async def recv_message(self):
+        """Receives a valid message from the given client."""
+        while True:
+            message = await self._recv_entire_message()
+            if (self.destination is None or
+                    message.header.origin == self.destination):
+                return await self._accept_recv_message(message)
+            else:
+                logging.error('reject: %s', repr(message))
+                await self.send_error_message(message)
 
     async def send_msg_message(self, message):
         """Sends a msg message."""
@@ -256,13 +294,11 @@ class ServerManager(MessageManager):
             data=message.data)
 
         await self._send_message(message)
+        return message
 
 
 class ClientManager(MessageManager):
-    """Message manager used on the client.
-
-    This manager uses simple blocking sockets to send and receive data.
-    """
+    """Message manager used on the client."""
 
     async def send_new_client_message(self):
         """Sends a new message.MessageType.NEW_CLIENT message.
@@ -305,6 +341,8 @@ class SenderManager(ClientManager):
             msg: the message string to be sent.
             destination: the destination of the message. Should be either a
                 receiver id or 0 to broadcast to all receivers.
+        Returns:
+            The message that was sent.
         """
         message = message_types.new_message(
             type=message_types.MessageType.MSG,
@@ -314,6 +352,7 @@ class SenderManager(ClientManager):
             data=msg)
 
         await self._send_message(message)
+        return message
 
     async def send_creq_message(self, destination):
         """Sends a new message.MessageType.CREQ message.
@@ -321,6 +360,8 @@ class SenderManager(ClientManager):
         Args:
             destination: receiver id of where the CLIST message should be sent
                 to.
+        Returns:
+            The message that was sent.
         """
         message = message_types.new_message(
             type=message_types.MessageType.CREQ,
@@ -329,3 +370,4 @@ class SenderManager(ClientManager):
             id=self._next_message_id)
 
         await self._send_message(message)
+        return message

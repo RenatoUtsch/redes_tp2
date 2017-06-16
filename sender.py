@@ -31,6 +31,7 @@ def main(argv):
                                       args.receiver_id) as manager:
         event_loop = messageio.EventLoop()
         event_loop.add_resource(manager, sender_loop(manager))
+        event_loop.add_client(manager, message_types.SERVER_ID)
         event_loop.run_forever()
 
 
@@ -48,18 +49,22 @@ async def sender_loop(manager):
     print('Registered as client number {}'.format(manager.origin))
 
     while True:
-        message_type = input('{MSG,CREQ}: ')
+        message_type = input('{MSG,CREQ,FLW}: ')
 
         if message_type.upper() == 'MSG':
             destination = int(
                 input('Insert a destination (0 for broadcast): '))
             message_data = input('Insert a new message to send: ')
-            await manager.send_msg_message(message_data, destination)
-            await manager.recv_ack_message()
+            message = await manager.send_msg_message(message_data, destination)
+            await manager.recv_ack_message(message)
         elif message_type.upper() == 'CREQ':
             destination = int(input('Insert a destination: '))
-            await manager.send_creq_message(destination)
-            await manager.recv_ack_message()
+            message = await manager.send_creq_message(destination)
+            await manager.recv_ack_message(message)
+        elif message_type.upper() == 'FLW':
+            message = await manager.send_close_message()
+            await manager.recv_ack_message(message)
+            break
         else:
             print('Invalid input. Please try again.\n')
 

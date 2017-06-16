@@ -118,9 +118,11 @@ class EventLoop:
 
     def client_list(self):
         """Returns a list with all client origins."""
-        return [
-            handler.resource.destination for handler in self._clients.values()
-        ]
+        return self._clients.keys()
+
+    def forward_list(self):
+        """Returns a list with all forward origins."""
+        return self._forwards.keys()
 
     def client(self, destination):
         """Returns the resource of the client with the given destination."""
@@ -198,14 +200,15 @@ class EventLoop:
             if forward_id not in self._clients:
                 raise ClientNotRegisteredError(resource)
 
-            logging.info('Client %d forwards messages to client %d',
-                         destination, forward_id)
+            if forward_id != destination:
+                logging.info('Client %d forwards messages to client %d',
+                             destination, forward_id)
             self._forwards[destination] = self._clients[forward_id]
 
     def forward_msg(self, message):
         """Forwards the given message to the correct destination handlers."""
         if message.header.destination == message_types.BROADCAST_DESTINATION:
-            for destination in self.client_list():
+            for destination in set(self.forward_list()):
                 self._forward_msg_to_client(message, destination)
         else:
             self._forward_msg_to_client(message, message.header.destination)
@@ -214,6 +217,9 @@ class EventLoop:
         """Forwards the given message to the given client."""
         self._forwards[destination].forward_queue.put_nowait(message)
 
+    def close_server(self):
+        """Closes by sending CLOSE messages to all connections."""
+
     def run_forever(self):
         """Runs forever, calling the registered handlers one after the other.
 
@@ -221,7 +227,6 @@ class EventLoop:
         """
         # Handlers that should be deleted at the end of each iteration.
         handlers_to_delete = []
-
         while self._handlers:
             readable, writable, forwardable, exceptional = self._select()
 
@@ -231,6 +236,10 @@ class EventLoop:
                     handler.status = handler.coroutine.send(handler)
                     assert handler.status is not None
                 except StopIteration:  # Handler finished.
+                    handlers_to_delete.append(handler)
+                except ResourceClosed:  # Handler finished with close.
+                    logging.info('Handler %d closed connection',
+                                 handler.fileno())
                     handlers_to_delete.append(handler)
                 except RuntimeError:  # Error in handler.
                     logging.exception('Error in handler: %d', handler.fileno())
@@ -341,6 +350,10 @@ class _HandlerStatus(enum.Enum):
 
 class Error(Exception):
     """Errors raised by this module."""
+
+
+class ResourceClosed(Error):
+    """Raised when a resource closes and needs to be cleaned up."""
 
 
 class ResourceError(Error):
